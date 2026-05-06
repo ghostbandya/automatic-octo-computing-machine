@@ -216,3 +216,18 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ── Cobblestone Energy Monitor ───────────────────────────────────────────────
+# Never commit secrets
+.env
+
+# Generated data and outputs (reproducible via main.py — no need to commit)
+data/raw/
+output/daily_brief_*.md
+output/logs/
+
+# Keep charts in version control (useful for README previews)
+# output/charts/ is intentionally NOT ignored
+
+# Keep the .env template
+!.env.example
