@@ -37,7 +37,7 @@ def build_prompt(metrics: dict) -> str:
     Constructs the structured LLM prompt grounded in the day's metrics.
     This is the exact prompt that would be sent to an LLM API.
     """
-    return f"""You are a senior European energy analyst at a commodity trading firm.
+    base = f"""You are a senior European energy analyst at a commodity trading firm.
 Today is {metrics['date']}. Your task is to write a concise, decision-useful trading
 narrative (150-200 words) for the morning desk brief.
 
@@ -52,7 +52,14 @@ implication clearly. Write in clear prose — no bullet points, no headers.
 5. TTF 30d Momentum:        {metrics['ttf_30d_momentum_pct']:+.1f}%
 6. EUA Carbon Price:        €{metrics['eua_price_eur']:.2f}/tonne
 7. EUA 30d Momentum:        {metrics['eua_30d_momentum_pct']:+.1f}%
-8. Gas-Carbon 30d Corr:     {metrics['gas_carbon_30d_corr']:.2f}
+8. Gas-Carbon 30d Corr:     {metrics['gas_carbon_30d_corr']:.2f}"""
+    if metrics.get("de_da_price_eur_mwh"):
+        base += (
+            f"\n9. DE Day-Ahead Power:      EUR {metrics['de_da_price_eur_mwh']:.2f}/MWh"
+            f"\n10. FR Day-Ahead Power:     EUR {metrics['fr_da_price_eur_mwh']:.2f}/MWh"
+            f"\n11. Clean Spark Spread:     EUR {metrics['clean_spark_spread_eur_mwh']:.2f}/MWh"
+        )
+    base += """
 ---
 
 Structure your narrative as three flowing paragraphs:
@@ -62,6 +69,7 @@ Structure your narrative as three flowing paragraphs:
    Day-Ahead and forward power risk — and what a trader should watch.
 
 Keep it under 200 words. No fluff."""
+    return base
 
 
 # ── Narrative generator ────────────────────────────────────────────────────────
@@ -111,7 +119,7 @@ def _generate_from_template(m: dict) -> str:
         "showing little cross-commodity correlation recently"
     )
     p2 = (
-        f"EUA carbon is {eua_trend} at €{m['eua_price_eur']:.2f}/tonne "
+        f"EUA carbon is {eua_trend} at EUR {m['eua_price_eur']:.2f}/tonne "
         f"({m['eua_30d_momentum_pct']:+.1f}% over 30 days), {eua_read}. "
         f"Gas and carbon are {corr_read} "
         f"(30-day correlation: {m['gas_carbon_30d_corr']:.2f})."
@@ -124,10 +132,18 @@ def _generate_from_template(m: dict) -> str:
         "downside risk"  if m['storage_vs_5yr_avg_ppt'] > 0  and m['eua_30d_momentum_pct'] < 0 else
         "balanced"
     )
+    css_note = ""
+    if m.get("clean_spark_spread_eur_mwh"):
+        css = m["clean_spark_spread_eur_mwh"]
+        css_note = (
+            f" The clean spark spread at EUR {css:.2f}/MWh indicates gas-fired generation "
+            f"is {'profitable' if css > 0 else 'loss-making'} at current prices."
+        )
+
     p3 = (
-        f"With TTF {ttf_trend} at €{m['ttf_price_eur_mwh']:.2f}/MWh and carbon costs elevated, "
+        f"With TTF {ttf_trend} at EUR {m['ttf_price_eur_mwh']:.2f}/MWh and carbon costs elevated, "
         f"the cross-commodity input stack keeps European Day-Ahead and near-curve power "
-        f"{bias}. The primary risk flag is the storage deficit: any weather-driven demand "
+        f"{bias}.{css_note} The primary risk flag is the storage deficit: any weather-driven demand "
         f"spike or supply disruption (Norwegian outages, LNG diversion) would re-price "
         f"the forward curve sharply higher. Traders should monitor daily injection prints "
         f"and TTF prompt spreads as leading indicators."
