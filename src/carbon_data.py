@@ -35,8 +35,8 @@ def fetch_eua_prices(days_back: int = 90) -> pd.DataFrame:
     -------
     pd.DataFrame with columns: date, eua_price_eur
     """
-    end   = datetime.today()
-    start = end - timedelta(days=days_back)
+    end   = datetime.today() + timedelta(days=1)   # yfinance end is exclusive — +1 day captures today
+    start = end - timedelta(days=days_back + 1)
 
     df = _fetch_ticker(PRIMARY_TICKER, start, end)
 

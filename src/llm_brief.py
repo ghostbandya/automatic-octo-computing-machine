@@ -29,6 +29,15 @@ from datetime import datetime
 TODAY   = datetime.today().strftime("%Y-%m-%d")
 LOG_DIR = os.path.join("output", "logs")
 
+# Zone display labels — must match column names in metrics.csv
+ZONE_LABELS = {
+    "de": "DE (Germany)",
+    "fr": "FR (France)",
+    "nl": "NL (Netherlands)",
+    "be": "BE (Belgium)",
+    "es": "ES (Spain)",
+}
+
 
 # ── Prompt builder ─────────────────────────────────────────────────────────────
 
@@ -52,21 +61,39 @@ implication clearly. Write in clear prose — no bullet points, no headers.
 5. TTF 30d Momentum:        {metrics['ttf_30d_momentum_pct']:+.1f}%
 6. EUA Carbon Price:        €{metrics['eua_price_eur']:.2f}/tonne
 7. EUA 30d Momentum:        {metrics['eua_30d_momentum_pct']:+.1f}%
-8. Gas-Carbon 30d Corr:     {metrics['gas_carbon_30d_corr']:.2f}"""
-    if metrics.get("de_da_price_eur_mwh"):
-        base += (
-            f"\n9. DE Day-Ahead Power:      EUR {metrics['de_da_price_eur_mwh']:.2f}/MWh"
-            f"\n10. FR Day-Ahead Power:     EUR {metrics['fr_da_price_eur_mwh']:.2f}/MWh"
-            f"\n11. Clean Spark Spread:     EUR {metrics['clean_spark_spread_eur_mwh']:.2f}/MWh"
-        )
+8. Gas-Carbon 30d Corr:     {metrics['gas_carbon_30d_corr']:.2f}
+9. TTF 90d Momentum:        {metrics.get('ttf_90d_momentum_pct', float('nan')):+.1f}%
+10. TTF Curve Premium:       {metrics.get('ttf_curve_premium_pct', float('nan')):+.1f}%  (positive = backwardation, negative = contango)"""
+
+    # Add all available DA power zone prices
+    n = 9
+    power_lines = []
+    for zone, label in ZONE_LABELS.items():
+        col = f"{zone}_da_price_eur_mwh"
+        val = metrics.get(col)
+        if val and not (isinstance(val, float) and pd.isna(val)):
+            power_lines.append(f"{n:>2}. {label} Day-Ahead:  EUR {val:.2f}/MWh")
+            n += 1
+    if power_lines:
+        base += "\n" + "\n".join(power_lines)
+
+    # Add CSS if available
+    css = metrics.get("clean_spark_spread_eur_mwh")
+    if css and not (isinstance(css, float) and pd.isna(css)):
+        base += f"\n{n:>2}. DE Clean Spark Spread:    EUR {css:.2f}/MWh"
+
     base += """
 ---
 
 Structure your narrative as three flowing paragraphs:
 1. Gas tightness: what the storage deficit and injection pace mean for supply risk.
 2. Carbon signal: what EUA momentum and the gas-carbon correlation tell us.
-3. Power curve implication: how gas and carbon together are setting up European
-   Day-Ahead and forward power risk — and what a trader should watch.
+3. Power curve implication: reference the Day-Ahead prices across all markets listed
+   above — note which zone is highest/lowest, what any spread between them signals
+   (grid constraints, renewable mix, market integration), and the CSS reading.
+   Incorporate the TTF curve signal (backwardation/contango) and what it implies
+   for near-term vs winter pricing risk.
+   State clearly what a trader should watch.
 
 Keep it under 200 words. No fluff."""
     return base
@@ -132,21 +159,89 @@ def _generate_from_template(m: dict) -> str:
         "downside risk"  if m['storage_vs_5yr_avg_ppt'] > 0  and m['eua_30d_momentum_pct'] < 0 else
         "balanced"
     )
+
+    # Curve shape signal from TTF 30d vs 90d momentum
+    curve_prem = m.get("ttf_curve_premium_pct")
+    ttf_90d    = m.get("ttf_90d_momentum_pct")
+    if curve_prem is not None and not (isinstance(curve_prem, float) and pd.isna(curve_prem)):
+        if curve_prem > 2:
+            curve_note = (
+                f" The TTF curve premium of {curve_prem:+.1f}% signals backwardation — "
+                f"near-term prices are trading above the 90-day mean, reflecting "
+                f"immediate supply tightness rather than a structural shift."
+            )
+        elif curve_prem < -2:
+            curve_note = (
+                f" The TTF curve discount of {curve_prem:+.1f}% signals contango — "
+                f"near-term prices are below the 90-day mean, suggesting the market "
+                f"is relaxed on prompt supply but cautious further out."
+            )
+        else:
+            curve_note = (
+                f" The TTF curve is near flat ({curve_prem:+.1f}% premium vs 90d mean), "
+                f"suggesting no strong near-term vs winter pricing divergence."
+            )
+    else:
+        curve_note = ""
+
+    # Collect available zone prices for cross-market commentary
+    zone_prices = {}
+    for zone, label in ZONE_LABELS.items():
+        col = f"{zone}_da_price_eur_mwh"
+        val = m.get(col)
+        if val and not (isinstance(val, float) and pd.isna(val)):
+            zone_prices[label] = val
+
+    if zone_prices:
+        # Build a compact zone price list: "DE EUR 122/MWh, FR EUR 113/MWh, ..."
+        price_list = ", ".join(
+            f"{lbl.split(' ')[0]} EUR {price:.0f}/MWh"
+            for lbl, price in zone_prices.items()
+        )
+        # Identify highest and lowest markets
+        highest_lbl = max(zone_prices, key=zone_prices.get)
+        lowest_lbl  = min(zone_prices, key=zone_prices.get)
+        spread      = max(zone_prices.values()) - min(zone_prices.values())
+
+        # ES often diverges — flag if it's the outlier
+        if "ES (Spain)" in zone_prices:
+            es_price = zone_prices["ES (Spain)"]
+            de_price = zone_prices.get("DE (Germany)", es_price)
+            es_spread_note = (
+                f" The DE–ES spread of EUR {abs(de_price - es_price):.0f}/MWh reflects "
+                f"Iberian grid constraints and a {'higher' if es_price < de_price else 'lower'} "
+                f"renewable contribution in Spain."
+                if abs(de_price - es_price) > 15 else ""
+            )
+        else:
+            es_spread_note = ""
+
+        zone_sentence = (
+            f"Day-Ahead prices across the five monitored markets: {price_list}. "
+            f"The EUR {spread:.0f}/MWh spread between {highest_lbl.split(' ')[0]} "
+            f"(highest) and {lowest_lbl.split(' ')[0]} (lowest) "
+            f"{'signals grid congestion or divergent fuel/renewable mix' if spread > 20 else 'indicates broadly integrated continental pricing'}."
+            f"{es_spread_note}"
+        )
+    else:
+        zone_sentence = ""
+
     css_note = ""
-    if m.get("clean_spark_spread_eur_mwh"):
-        css = m["clean_spark_spread_eur_mwh"]
+    css = m.get("clean_spark_spread_eur_mwh")
+    if css and not (isinstance(css, float) and pd.isna(css)):
         css_note = (
-            f" The clean spark spread at EUR {css:.2f}/MWh indicates gas-fired generation "
+            f" The DE clean spark spread at EUR {css:.2f}/MWh confirms gas-fired generation "
             f"is {'profitable' if css > 0 else 'loss-making'} at current prices."
         )
 
     p3 = (
         f"With TTF {ttf_trend} at EUR {m['ttf_price_eur_mwh']:.2f}/MWh and carbon costs elevated, "
-        f"the cross-commodity input stack keeps European Day-Ahead and near-curve power "
-        f"{bias}.{css_note} The primary risk flag is the storage deficit: any weather-driven demand "
-        f"spike or supply disruption (Norwegian outages, LNG diversion) would re-price "
-        f"the forward curve sharply higher. Traders should monitor daily injection prints "
-        f"and TTF prompt spreads as leading indicators."
+        f"the cross-commodity input stack keeps near-curve power {bias}."
+        f"{curve_note} "
+        f"{zone_sentence}{css_note} "
+        f"The primary risk flag is the storage deficit: any demand spike or supply disruption "
+        f"(Norwegian outages, LNG diversion) would re-price the forward curve sharply higher. "
+        f"Watch daily injection prints and TTF prompt spreads as leading indicators."
     )
 
     return f"{p1}\n\n{p2}\n\n{p3}"

@@ -3,7 +3,10 @@ gas_data.py
 -----------
 Pulls EU aggregated gas storage data from GIE AGSI+ API.
 Endpoint: /api/data/eu  (EU aggregate)
-Outputs:  data/raw/gas_storage.csv
+
+Outputs:
+  data/raw/gas_storage.csv      -- trailing 90 days (daily refresh)
+  data/raw/gas_storage_5yr.csv  -- 5-year history (fetched once, cached)
 
 Requires: GIE_API_KEY in .env
 Install:  pip install requests pandas python-dotenv
@@ -87,6 +90,68 @@ def fetch_gas_storage(days_back: int = 90) -> pd.DataFrame:
     print(f"[gas_data]   Latest ({latest['date'].date()}): "
           f"storage = {latest['storage_pct_full']:.1f}% full | "
           f"trend = {latest['trend_ppt']:+.2f} ppt")
+
+    return df
+
+
+def fetch_gas_storage_5yr() -> pd.DataFrame:
+    """
+    Pulls ~5 years of EU gas storage history from GIE AGSI+ (paginated).
+    Used to compute the seasonal average and ±1 std band for Chart 1.
+    Saves to data/raw/gas_storage_5yr.csv.
+
+    Returns
+    -------
+    pd.DataFrame with columns: date, storage_pct_full
+    """
+    if not API_KEY:
+        raise EnvironmentError("GIE_API_KEY not found in .env file.")
+
+    end_date   = datetime.today()
+    start_date = end_date.replace(year=end_date.year - 5)
+
+    headers = {"x-key": API_KEY}
+    all_records = []
+    page = 1
+    page_size = 300
+
+    print(f"[gas_data] Fetching 5yr EU storage history ({start_date.date()} -> {end_date.date()}) ...")
+
+    while True:
+        params = {
+            "from": start_date.strftime("%Y-%m-%d"),
+            "till": end_date.strftime("%Y-%m-%d"),
+            "size": page_size,
+            "page": page,
+        }
+        response = requests.get(BASE_URL, params=params, headers=headers, timeout=20)
+        response.raise_for_status()
+        payload = response.json()
+
+        records = payload.get("data", [])
+        if not records:
+            break
+        all_records.extend(records)
+
+        # Check if more pages exist
+        total = payload.get("total", len(all_records))
+        if len(all_records) >= total:
+            break
+        page += 1
+
+    if not all_records:
+        raise ValueError("[gas_data] No 5yr history returned. Check API key.")
+
+    df = pd.DataFrame(all_records)
+    df = df[["gasDayStart", "full"]].rename(columns={"gasDayStart": "date", "full": "storage_pct_full"})
+    df["date"]             = pd.to_datetime(df["date"])
+    df["storage_pct_full"] = pd.to_numeric(df["storage_pct_full"], errors="coerce")
+    df = df.dropna().sort_values("date").reset_index(drop=True)
+
+    out_path = os.path.join("data", "raw", "gas_storage_5yr.csv")
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    df.to_csv(out_path, index=False)
+    print(f"[gas_data] 5yr history: {len(df)} rows saved to {out_path}")
 
     return df
 

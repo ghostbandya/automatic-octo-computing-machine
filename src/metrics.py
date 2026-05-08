@@ -1,11 +1,11 @@
 """
 metrics.py
 ----------
-Computes the 8 daily monitor metrics from cleaned data files.
+Computes daily monitor metrics from cleaned data files.
 Outputs: data/metrics.csv
 
-Metrics:
-  1. EU Gas Storage % Full (current)
+Core metrics (always computed):
+  1. EU Gas Storage % Full
   2. Storage deviation from 5yr seasonal average (ppt)
   3. Storage injection rate vs 30-day average (GWh/day)
   4. TTF M+1 price (EUR/MWh)
@@ -13,6 +13,11 @@ Metrics:
   6. EUA spot price proxy (EUR/tonne)
   7. EUA 30-day price momentum (%)
   8. Gas-Carbon 30-day rolling correlation
+
+Power metrics (computed when data/raw/power_da.csv exists):
+  9+. Day-Ahead price per zone: DE, FR, GB, NL, BE, ES
+  *   Clean Spark Spread DE (EUR/MWh)  — CSS = DA_DE - TTF/0.49 - 0.202*EUA
+  *   DE Power-Gas Spread (EUR/MWh)
 
 Install: pip install pandas numpy
 """
@@ -36,9 +41,18 @@ METRIC_NOTES = {
 }
 
 
+GAS_EFFICIENCY = 0.49    # CCGT thermal efficiency
+GAS_CARBON_INT = 0.202   # tCO2/MWh gas burned
+
+# DA price zones — columns are {code}_da_price_eur_mwh
+# GB excluded: post-Brexit data no longer published on ENTSO-E
+POWER_ZONES = ["de", "fr", "nl", "be", "es"]
+
+
 def compute_metrics() -> pd.DataFrame:
     """
-    Loads raw CSVs, computes all 8 metrics, and saves to data/metrics.csv.
+    Loads raw CSVs, computes all metrics, and saves to data/metrics.csv.
+    Power metrics are included when data/raw/power_da.csv exists.
 
     Returns
     -------
@@ -79,6 +93,28 @@ def compute_metrics() -> pd.DataFrame:
     # --- Metric 5: TTF 30-day momentum ---
     df["ttf_30d_momentum_pct"] = df["ttf_price_eur_mwh"].pct_change(30) * 100
 
+    # --- Curve metrics: TTF 90d momentum + curve premium ---
+    # ttf_90d_momentum_pct  : medium-term trend (compare to 30d for curve shape)
+    # ttf_curve_premium_pct : how far current price sits above its 90d mean.
+    #   Positive = market pricing near-term scarcity (backwardation-like signal)
+    #   Negative = market relaxed, forward curve in contango
+    df["ttf_90d_momentum_pct"]  = df["ttf_price_eur_mwh"].pct_change(90) * 100
+    df["ttf_curve_premium_pct"] = (
+        (df["ttf_price_eur_mwh"] - df["ttf_price_eur_mwh"].rolling(90, min_periods=30).mean())
+        / df["ttf_price_eur_mwh"].rolling(90, min_periods=30).mean() * 100
+    )
+
+    # --- Injection seasonal average (needed for Chart 5) ---
+    inj_5yr = gas_5yr.copy()
+    inj_5yr["doy"] = inj_5yr["date"].dt.dayofyear
+    # Map injection_gwh from gas history where available; otherwise use storage trend
+    if "injection" in gas_5yr.columns:
+        inj_5yr["injection_gwh"] = pd.to_numeric(inj_5yr["injection"], errors="coerce")
+        inj_doy_avg = (inj_5yr[inj_5yr["date"].dt.year < current_year]
+                       .groupby("doy")["injection_gwh"].mean()
+                       .rename("injection_5yr_avg_gwh"))
+        df = df.merge(inj_doy_avg, on="doy", how="left")
+
     # --- Metric 7: EUA 30-day momentum ---
     df["eua_30d_momentum_pct"] = df["eua_price_eur"].pct_change(30) * 100
 
@@ -89,20 +125,45 @@ def compute_metrics() -> pd.DataFrame:
         .corr(df["eua_price_eur"])
     )
 
-    # --- Final column selection ---
-    output_cols = [
+    # --- Power metrics (optional) ---
+    power_path = os.path.join("data", "raw", "power_da.csv")
+    has_power  = os.path.exists(power_path)
+    if has_power:
+        power = pd.read_csv(power_path, parse_dates=["date"])
+        df    = df.merge(power, on="date", how="left")
+        # Forward-fill all zone price columns
+        zone_cols = [f"{z}_da_price_eur_mwh" for z in POWER_ZONES
+                     if f"{z}_da_price_eur_mwh" in df.columns]
+        for col in zone_cols:
+            df[col] = df[col].ffill()
+        # Clean Spark Spread (DE — most liquid EUR-denominated gas-marginal market)
+        if "de_da_price_eur_mwh" in df.columns:
+            df["clean_spark_spread_eur_mwh"] = (
+                df["de_da_price_eur_mwh"]
+                - (df["ttf_price_eur_mwh"] / GAS_EFFICIENCY)
+                - (GAS_CARBON_INT * df["eua_price_eur"])
+            )
+            df["de_power_gas_spread_mwh"] = (
+                df["de_da_price_eur_mwh"] - df["ttf_price_eur_mwh"]
+            )
+
+    # --- Final column selection (keep only columns that exist) ---
+    base_cols = [
         "date",
-        "storage_pct_full",
-        "storage_vs_5yr_avg_ppt",
-        "storage_5yr_avg",
-        "injection_gwh",
-        "injection_vs_30d_avg_gwh",
-        "ttf_price_eur_mwh",
-        "ttf_30d_momentum_pct",
-        "eua_price_eur",
-        "eua_30d_momentum_pct",
+        "storage_pct_full", "storage_vs_5yr_avg_ppt", "storage_5yr_avg",
+        "injection_gwh", "injection_30d_avg_gwh", "injection_vs_30d_avg_gwh",
+        "injection_5yr_avg_gwh",
+        "ttf_price_eur_mwh", "ttf_30d_momentum_pct",
+        "ttf_90d_momentum_pct", "ttf_curve_premium_pct",
+        "eua_price_eur", "eua_30d_momentum_pct",
         "gas_carbon_30d_corr",
     ]
+    power_cols = (
+        [f"{z}_da_price_eur_mwh" for z in POWER_ZONES]
+        + ["clean_spark_spread_eur_mwh", "de_power_gas_spread_mwh"]
+    ) if has_power else []
+
+    output_cols = [c for c in base_cols + power_cols if c in df.columns]
     result = df[output_cols].copy()
 
     os.makedirs("data", exist_ok=True)
@@ -120,29 +181,43 @@ def compute_metrics() -> pd.DataFrame:
     print(f"  2. vs 5yr Seasonal Avg     {latest['storage_vs_5yr_avg_ppt']:+.1f} ppt")
     print(f"     {METRIC_NOTES['storage_vs_5yr_avg_ppt']}")
     print()
-    inj = latest['injection_vs_30d_avg_gwh']
-    print(f"  3. Injection vs 30d Avg    {inj:+.0f} GWh/day")
+    print(f"  3. Injection vs 30d Avg    {latest['injection_vs_30d_avg_gwh']:+.0f} GWh/day")
     print(f"     {METRIC_NOTES['injection_vs_30d_avg_gwh']}")
     print()
-    print(f"  4. TTF M+1 Price           €{latest['ttf_price_eur_mwh']:.2f}/MWh")
+    print(f"  4. TTF M+1 Price           EUR {latest['ttf_price_eur_mwh']:.2f}/MWh")
     print(f"     {METRIC_NOTES['ttf_price_eur_mwh']}")
     print()
-    mom = latest['ttf_30d_momentum_pct']
-    print(f"  5. TTF 30d Momentum        {mom:+.1f}%")
+    print(f"  5. TTF 30d Momentum        {latest['ttf_30d_momentum_pct']:+.1f}%")
     print(f"     {METRIC_NOTES['ttf_30d_momentum_pct']}")
     print()
-    print(f"  6. EUA Carbon Price        €{latest['eua_price_eur']:.2f}/tonne")
+    print(f"  6. EUA Carbon Price        EUR {latest['eua_price_eur']:.2f}/tonne")
     print(f"     {METRIC_NOTES['eua_price_eur']}")
     print()
-    emom = latest['eua_30d_momentum_pct']
-    print(f"  7. EUA 30d Momentum        {emom:+.1f}%")
+    print(f"  7. EUA 30d Momentum        {latest['eua_30d_momentum_pct']:+.1f}%")
     print(f"     {METRIC_NOTES['eua_30d_momentum_pct']}")
     print()
-    corr = latest['gas_carbon_30d_corr']
-    print(f"  8. Gas-Carbon 30d Corr     {corr:.2f}")
+    print(f"  8. Gas-Carbon 30d Corr     {latest['gas_carbon_30d_corr']:.2f}")
     print(f"     {METRIC_NOTES['gas_carbon_30d_corr']}")
+    if has_power:
+        print()
+        zone_labels = {"de": "DE (Germany)", "fr": "FR (France)",
+                       "gb": "GB (Gt Britain)", "nl": "NL (Netherlands)",
+                       "be": "BE (Belgium)",   "es": "ES (Spain)"}
+        n = 9
+        for z in POWER_ZONES:
+            col = f"{z}_da_price_eur_mwh"
+            if col in latest and pd.notna(latest[col]):
+                currency = "GBP" if z == "gb" else "EUR"
+                print(f"  {n:>2}. DA Power {zone_labels[z]:<18} {currency} {latest[col]:.2f}/MWh")
+                n += 1
+        if "clean_spark_spread_eur_mwh" in latest and pd.notna(latest["clean_spark_spread_eur_mwh"]):
+            css = latest["clean_spark_spread_eur_mwh"]
+            print(f"  {n:>2}. Clean Spark Spread (DE)       EUR {css:.2f}/MWh")
+            n += 1
+        if "de_power_gas_spread_mwh" in latest and pd.notna(latest["de_power_gas_spread_mwh"]):
+            print(f"  {n:>2}. DE Power-Gas Spread            EUR {latest['de_power_gas_spread_mwh']:.2f}/MWh")
     print("="*55)
-    print(f"  Saved → data/metrics.csv ({len(result)} rows)\n")
+    print(f"  Saved -> data/metrics.csv ({len(result)} rows)\n")
 
     return result
 
