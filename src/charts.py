@@ -1,12 +1,12 @@
 """
 charts.py
 ---------
-Generates publication-quality charts for the daily brief.
+Generates charts for the daily brief.
 
 Chart 1: EU Gas Storage vs 5yr Seasonal Average
 Chart 2: EUA Carbon vs TTF Gas Price (dual axis, 90 days)
 Chart 3: Multi-zone Day-Ahead Power + DE Clean Spark Spread [requires ENTSO-E]
-Chart 4: TTF Forward Curve Signal — price vs 30d/90d MA + momentum comparison
+Chart 4: TTF Forward Curve Signal — price vs 30d/90d MA + momentum comparison (As a stand in for forward curve, to construct a forward curve, I would require proprietary datasets)
 Chart 5: Daily Injection Pace vs 30d Average + 5yr Seasonal Norm
 Chart 6: Cross-Zone Power Spreads — DE vs FR, NL, ES [requires ENTSO-E]
 

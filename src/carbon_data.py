@@ -1,10 +1,25 @@
 """
 carbon_data.py
 --------------
-Pulls EUA (EU Carbon Allowance) daily price data.
-Primary source : CO2.L (WisdomTree Carbon ETP, LSE) via yfinance
-                 — closely tracks EUA spot, free, no API key required.
-Fallback       : CARP.PA (Amundi MSCI Carbon ETP, Euronext Paris)
+Pulls EUA (EU Emission Allowance) daily price data.
+
+Why EUA prices matter for this monitor:
+  EUA is the marginal cost of carbon for EU power generators. Higher EUA
+  prices raise the cost of coal-fired generation more than gas-fired
+  (coal emits ~2x more CO2/MWh), which compresses the clean dark spread
+  and encourages fuel switching from coal to gas — directly supporting
+  both gas demand and power prices.
+
+Data source:
+  Primary : CO2.L  — WisdomTree Carbon ETP (LSE, GBP-settled but EUR-hedged).
+            Tracks the ICE EUA front-month futures roll. Best freely available
+            proxy for EUA spot, no API key required.
+  Fallback: CARP.PA — Amundi MSCI Carbon ETP (Euronext Paris, EUR-settled).
+
+Note: CO2.L prices are in GBP on Yahoo Finance but closely track EUR EUA.
+      For this monitor we use the close price as a directional proxy —
+      for precise EUR/tonne levels, an ICE or Bloomberg feed would be used
+      in a production environment.
 
 Outputs: data/raw/carbon_eua.csv
 
@@ -17,25 +32,33 @@ import yfinance as yf
 from datetime import datetime, timedelta
 
 
-# CO2.L tracks the ICE EUA futures roll — best freely available proxy
 PRIMARY_TICKER  = "CO2.L"
 FALLBACK_TICKER = "CARP.PA"
 
 
-def fetch_eua_prices(days_back: int = 90) -> pd.DataFrame:
+def fetch_eua_prices(days_back: int = 180) -> pd.DataFrame:
     """
-    Pulls EUA price proxy time series.
+    Pulls EUA price proxy time series via Yahoo Finance.
+
+    We default to 180 days so that the 90-day momentum metric
+    (pct_change(90)) has enough history to produce non-NaN values
+    across the visible chart window.
+
+    The end date is set to today + 1 day because yfinance treats
+    the end parameter as exclusive — without the +1, today's session
+    would be omitted from the pull.
 
     Parameters
     ----------
     days_back : int
-        How many calendar days of history to pull
+        Calendar days of history to pull (default 180)
 
     Returns
     -------
     pd.DataFrame with columns: date, eua_price_eur
     """
-    end   = datetime.today() + timedelta(days=1)   # yfinance end is exclusive — +1 day captures today
+    # +1 day on end because yfinance range is [start, end) — exclusive end
+    end   = datetime.today() + timedelta(days=1)
     start = end - timedelta(days=days_back + 1)
 
     df = _fetch_ticker(PRIMARY_TICKER, start, end)
@@ -50,7 +73,6 @@ def fetch_eua_prices(days_back: int = 90) -> pd.DataFrame:
             "Check your internet connection or try again later."
         )
 
-    # Save
     out_path = os.path.join("data", "raw", "carbon_eua.csv")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     df.to_csv(out_path, index=False)
@@ -64,7 +86,12 @@ def fetch_eua_prices(days_back: int = 90) -> pd.DataFrame:
 
 
 def _fetch_ticker(ticker: str, start: datetime, end: datetime) -> pd.DataFrame | None:
-    """Internal helper — downloads a Yahoo Finance ticker and normalises columns."""
+    """
+    Internal helper — downloads a Yahoo Finance ticker and normalises columns.
+
+    Returns None (rather than raising) so the caller can cleanly try the
+    fallback ticker without exception handling noise.
+    """
     print(f"[carbon_data] Fetching {ticker} from Yahoo Finance ...")
     try:
         raw = yf.Ticker(ticker).history(
@@ -76,6 +103,7 @@ def _fetch_ticker(ticker: str, start: datetime, end: datetime) -> pd.DataFrame |
 
         df = raw.reset_index()[["Date", "Close"]].copy()
         df.rename(columns={"Date": "date", "Close": "eua_price_eur"}, inplace=True)
+        # Strip timezone info — all downstream processing assumes naive UTC dates
         df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
         df["eua_price_eur"] = pd.to_numeric(df["eua_price_eur"], errors="coerce")
         df = df.dropna().sort_values("date").reset_index(drop=True)

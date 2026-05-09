@@ -1,14 +1,20 @@
 """
 gas_data.py
 -----------
-Pulls EU aggregated gas storage data from GIE AGSI+ API.
-Endpoint: /api/data/eu  (EU aggregate)
+Pulls EU aggregated gas storage data from the GIE AGSI+ API.
+Endpoint: /api/data/eu  (EU aggregate across all member states)
+
+Why GIE AGSI+?
+  The Gas Infrastructure Europe (GIE) AGSI+ platform is the authoritative
+  source for EU gas storage transparency data, mandated under EU Regulation
+  715/2009. It covers ~90% of EU storage capacity and is published daily
+  (with a ~1 day lag — data for gas day T is available on T+1 morning).
 
 Outputs:
-  data/raw/gas_storage.csv      -- trailing 90 days (daily refresh)
-  data/raw/gas_storage_5yr.csv  -- 5-year history (fetched once, cached)
+  data/raw/gas_storage.csv      -- trailing N days (refreshed on every run)
+  data/raw/gas_storage_5yr.csv  -- 5-year history (cached, re-fetched if >7 days stale)
 
-Requires: GIE_API_KEY in .env
+Requires: GIE_API_KEY in .env   
 Install:  pip install requests pandas python-dotenv
 """
 
@@ -24,9 +30,13 @@ API_KEY = os.getenv("GIE_API_KEY")
 BASE_URL = "https://agsi.gie.eu/api/data/eu"
 
 
-def fetch_gas_storage(days_back: int = 90) -> pd.DataFrame:
+def fetch_gas_storage(days_back: int = 180) -> pd.DataFrame:
     """
     Pulls EU aggregated gas storage data from GIE AGSI+.
+
+    We default to 180 days (rather than 90) so that derived metrics such as
+    the 90-day TTF momentum and rolling correlations have a full window of
+    data to compute against without producing NaN-heavy outputs.
 
     Returns
     -------
@@ -43,7 +53,7 @@ def fetch_gas_storage(days_back: int = 90) -> pd.DataFrame:
     params = {
         "from": start_date.strftime("%Y-%m-%d"),
         "till": end_date.strftime("%Y-%m-%d"),
-        "size": 300,
+        "size": 300,   # max records per page; 300 comfortably covers 180 days
     }
     headers = {"x-key": API_KEY}
 
@@ -62,19 +72,20 @@ def fetch_gas_storage(days_back: int = 90) -> pd.DataFrame:
 
     df = pd.DataFrame(records)
 
+    # Rename API field names to readable column names
     keep = {
         "gasDayStart":      "date",
-        "full":             "storage_pct_full",
-        "gasInStorage":     "gas_in_storage_twh",
-        "workingGasVolume": "working_gas_volume_twh",
-        "injection":        "injection_gwh",
-        "withdrawal":       "withdrawal_gwh",
-        "trend":            "trend_ppt",
-        "consumption":      "consumption_gwh",
+        "full":             "storage_pct_full",      # % of working gas volume filled
+        "gasInStorage":     "gas_in_storage_twh",    # absolute level (TWh)
+        "workingGasVolume": "working_gas_volume_twh",# total EU working gas capacity
+        "injection":        "injection_gwh",         # net gas injected that day (GWh)
+        "withdrawal":       "withdrawal_gwh",        # net gas withdrawn that day (GWh)
+        "trend":            "trend_ppt",             # day-on-day change in fill % (ppt)
+        "consumption":      "consumption_gwh",       # estimated EU gas consumption (GWh)
     }
     df = df[[c for c in keep if c in df.columns]].rename(columns=keep)
 
-    # Type coercion
+    # Type coercion — API returns all fields as strings
     df["date"] = pd.to_datetime(df["date"])
     for col in df.columns[1:]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -97,12 +108,17 @@ def fetch_gas_storage(days_back: int = 90) -> pd.DataFrame:
 def fetch_gas_storage_5yr() -> pd.DataFrame:
     """
     Pulls ~5 years of EU gas storage history from GIE AGSI+ (paginated).
-    Used to compute the seasonal average and ±1 std band for Chart 1.
-    Saves to data/raw/gas_storage_5yr.csv.
 
-    Returns
-    -------
-    pd.DataFrame with columns: date, storage_pct_full
+    Why 5 years?
+      The 5yr window captures at least one full seasonal cycle in each storage
+      year (injection Apr–Oct, withdrawal Nov–Mar), giving a statistically
+      robust seasonal average and ±1 std band for Chart 1 and the
+      storage-vs-seasonal-average metric.
+
+    The API paginates at 300 records per page, so we loop until we've received
+    all records (checked against the `total` field in the response payload).
+
+    Saves to data/raw/gas_storage_5yr.csv
     """
     if not API_KEY:
         raise EnvironmentError("GIE_API_KEY not found in .env file.")
@@ -110,12 +126,13 @@ def fetch_gas_storage_5yr() -> pd.DataFrame:
     end_date   = datetime.today()
     start_date = end_date.replace(year=end_date.year - 5)
 
-    headers = {"x-key": API_KEY}
+    headers   = {"x-key": API_KEY}
     all_records = []
-    page = 1
+    page      = 1
     page_size = 300
 
-    print(f"[gas_data] Fetching 5yr EU storage history ({start_date.date()} -> {end_date.date()}) ...")
+    print(f"[gas_data] Fetching 5yr EU storage history "
+          f"({start_date.date()} -> {end_date.date()}) ...")
 
     while True:
         params = {
@@ -130,10 +147,10 @@ def fetch_gas_storage_5yr() -> pd.DataFrame:
 
         records = payload.get("data", [])
         if not records:
-            break
+            break                      # no more pages — exit loop
         all_records.extend(records)
 
-        # Check if more pages exist
+        # `total` is the full result count across all pages; stop when we have it all
         total = payload.get("total", len(all_records))
         if len(all_records) >= total:
             break
@@ -143,7 +160,10 @@ def fetch_gas_storage_5yr() -> pd.DataFrame:
         raise ValueError("[gas_data] No 5yr history returned. Check API key.")
 
     df = pd.DataFrame(all_records)
-    df = df[["gasDayStart", "full"]].rename(columns={"gasDayStart": "date", "full": "storage_pct_full"})
+    # We only need date and fill % for the seasonal average calculation
+    df = df[["gasDayStart", "full"]].rename(
+        columns={"gasDayStart": "date", "full": "storage_pct_full"}
+    )
     df["date"]             = pd.to_datetime(df["date"])
     df["storage_pct_full"] = pd.to_numeric(df["storage_pct_full"], errors="coerce")
     df = df.dropna().sort_values("date").reset_index(drop=True)
