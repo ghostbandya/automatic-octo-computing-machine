@@ -1,4 +1,4 @@
-#European Cross-Commodity Risk Monitor
+# European Cross-Commodity Risk Monitor
 
 **Vedang Abhyankar** | vedangabhyankar19@gmail.com
 
