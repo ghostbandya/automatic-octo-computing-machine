@@ -1,5 +1,4 @@
 """
-main.py — Cobblestone Energy Daily Brief Pipeline Orchestrator
 ==============================================================
 Entry point for the full pipeline. Run with: python main.py
 
@@ -25,7 +24,7 @@ TODAY_DISPLAY = datetime.today().strftime("%d %B %Y")
 
 def run():
     print("\n" + "="*60)
-    print(f"  COBBLESTONE ENERGY -- DAILY BRIEF PIPELINE  {TODAY_DISPLAY}")
+    print(f" DAILY BRIEF PIPELINE  {TODAY_DISPLAY}")
     print("="*60 + "\n")
 
     # ── Step 1: EU Gas Storage ────────────────────────────────────────────────
